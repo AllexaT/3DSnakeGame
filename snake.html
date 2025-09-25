@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Neo 3D Snake</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            color-scheme: dark light;
+            font-family: "Segoe UI", Tahoma, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at 20% 20%, #1f2937, #030712 70%);
+            color: #e5e7eb;
+        }
+
+        .hud {
+            width: min(92vw, 780px);
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+            align-items: center;
+        }
+
+        h1 {
+            margin: 0.4rem 0 0;
+            text-transform: uppercase;
+            letter-spacing: 0.3rem;
+            font-size: clamp(2rem, 4vw, 2.8rem);
+        }
+
+        .stats {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .pill {
+            padding: 0.55rem 1.4rem;
+            border-radius: 999px;
+            background: rgba(30, 64, 175, 0.45);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+        }
+
+        .viewport {
+            width: min(90vw, 640px);
+            aspect-ratio: 1;
+            position: relative;
+            border-radius: 20px;
+            overflow: hidden;
+            background: rgba(15, 23, 42, 0.75);
+            box-shadow: 0 30px 60px rgba(2, 6, 23, 0.6);
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.8rem;
+            text-align: center;
+            background: rgba(15, 23, 42, 0.82);
+            backdrop-filter: blur(4px);
+        }
+
+        .overlay.hidden {
+            display: none;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+            justify-content: center;
+        }
+
+        button {
+            appearance: none;
+            border: none;
+            border-radius: 12px;
+            padding: 0.65rem 1.4rem;
+            font-size: 1rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            cursor: pointer;
+            color: #0f172a;
+            background: linear-gradient(130deg, #38bdf8, #22d3ee);
+            box-shadow: 0 16px 30px rgba(14, 165, 233, 0.25);
+            transition: transform 0.12s ease, box-shadow 0.2s ease;
+        }
+
+        button:active {
+            transform: scale(0.95);
+            box-shadow: none;
+        }
+
+        .hint {
+            font-size: 0.95rem;
+            color: rgba(226, 232, 240, 0.7);
+            max-width: 520px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="hud">
+        <h1>Neo 3D Snake</h1>
+        <div class="stats">
+            <span class="pill">Score: <strong id="score">0</strong></span>
+            <span class="pill">Best: <strong id="best">0</strong></span>
+            <span class="pill">Speed: <strong id="speed-label">Medium</strong></span>
+        </div>
+        <div class="viewport">
+            <canvas id="scene"></canvas>
+            <div class="overlay" id="overlay">
+                <h2 id="overlay-title">Press Start</h2>
+                <p id="overlay-body">Use Left or Right to steer. The snake moves forward automatically.</p>
+                <div class="controls">
+                    <button id="start">Start</button>
+                    <button id="pause">Pause</button>
+                    <button id="speed-btn">Speed</button>
+                </div>
+            </div>
+        </div>
+        <p class="hint">Use left/right arrows (or A/D) to turn. Space toggles pause, P toggles orbit.</p>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.159.0/build/three.min.js"></script>
+    <script>
+        const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("scene"), antialias: true, alpha: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+        camera.position.set(8, 12, 16);
+        camera.lookAt(0, 0, 0);
+        const headWorldPosition = new THREE.Vector3();
+        const desiredCameraPosition = new THREE.Vector3();
+        const directionVector = new THREE.Vector3();
+        const cameraTarget = new THREE.Vector3();
+
+        const light = new THREE.DirectionalLight(0xffffff, 1);
+        light.position.set(6, 10, 4);
+        scene.add(light);
+
+        scene.add(new THREE.AmbientLight(0x6b7280, 0.55));
+
+        const gridSize = 14;
+        const cellSize = 1.1;
+        const boardOffset = (gridSize - 1) * cellSize * 0.5;
+        const followDistance = cellSize * 6.5;
+        const followHeight = cellSize * 5.8;
+        const lerpSpeed = 14;
+        const cameraLerpSpeed = 6;
+
+        const board = new THREE.Group();
+        const floor = new THREE.Mesh(
+            new THREE.PlaneGeometry(gridSize * cellSize, gridSize * cellSize),
+            new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.1, roughness: 0.7 })
+        );
+        floor.rotation.x = -Math.PI / 2;
+        board.add(floor);
+
+        const gridHelper = new THREE.GridHelper(gridSize * cellSize, gridSize, 0x2563eb, 0x1e3a8a);
+        gridHelper.position.y = 0.01;
+        board.add(gridHelper);
+
+        scene.add(board);
+
+        const snakeMaterial = new THREE.MeshStandardMaterial({ color: 0x38bdf8, metalness: 0.3, roughness: 0.4 });
+        const headMaterial = new THREE.MeshStandardMaterial({ color: 0xfacc15, emissive: 0xfcd34d, emissiveIntensity: 0.6 });
+        const foodMaterial = new THREE.MeshStandardMaterial({ color: 0xf472b6, emissive: 0xbe123c, emissiveIntensity: 0.4 });
+
+        const cubeGeometry = new THREE.BoxGeometry(cellSize * 0.82, cellSize * 0.82, cellSize * 0.82);
+
+        let snakeSegments = [];
+        let snakeMeshes = [];
+        let direction = { x: 1, z: 0 };
+        let nextDirections = [];
+        let food = null;
+        let foodMesh = null;
+        let score = 0;
+        let best = Number(localStorage.getItem("neo3d-best") ?? 0);
+        let isRunning = false;
+        let isPaused = true;
+        let timeAccumulator = 0;
+        let previousTimestamp = null;
+        let stepInterval = 180;
+        let orbitEnabled = false;
+
+        document.getElementById("best").textContent = best;
+
+        function positionToWorld(pos) {
+            return {
+                x: pos.x * cellSize - boardOffset,
+                y: cellSize * 0.45,
+                z: pos.z * cellSize - boardOffset
+            };
+        }
+
+        function createSnakeMesh(index) {
+            const material = index === 0 ? headMaterial.clone() : snakeMaterial.clone();
+            return new THREE.Mesh(cubeGeometry, material);
+        }
+
+        function syncSnakeMeshes(deltaSeconds = 0) {
+            while (snakeMeshes.length < snakeSegments.length) {
+                const mesh = createSnakeMesh(snakeMeshes.length);
+                mesh.userData.target = new THREE.Vector3();
+                board.add(mesh);
+                snakeMeshes.push(mesh);
+            }
+
+            const lerpFactor = deltaSeconds > 0 ? Math.min(1, deltaSeconds * lerpSpeed) : 1;
+
+            snakeMeshes.forEach((mesh, index) => {
+                const segment = snakeSegments[index];
+                if (!segment) {
+                    mesh.visible = false;
+                    return;
+                }
+                const target = positionToWorld(segment);
+                mesh.userData.target.set(target.x, target.y, target.z);
+
+                if (lerpFactor >= 1 || mesh.position.lengthSq() === 0) {
+                    mesh.position.copy(mesh.userData.target);
+                } else {
+                    mesh.position.lerp(mesh.userData.target, lerpFactor);
+                }
+                mesh.visible = true;
+            });
+
+            while (snakeMeshes.length > snakeSegments.length) {
+                const removed = snakeMeshes.pop();
+                board.remove(removed);
+            }
+        }
+
+        function spawnFood() {
+            const emptyCells = [];
+            for (let x = 0; x < gridSize; x++) {
+                for (let z = 0; z < gridSize; z++) {
+                    if (!snakeSegments.some(segment => segment.x === x && segment.z === z)) {
+                        emptyCells.push({ x, z });
+                    }
+                }
+            }
+
+            food = emptyCells[Math.floor(Math.random() * emptyCells.length)];
+
+            if (!foodMesh) {
+                foodMesh = new THREE.Mesh(cubeGeometry, foodMaterial);
+                board.add(foodMesh);
+            }
+
+            const world = positionToWorld(food);
+            foodMesh.position.set(world.x, world.y, world.z);
+        }
+
+        function resetGame() {
+            snakeSegments = [
+                { x: Math.floor(gridSize / 2) - 1, z: Math.floor(gridSize / 2) },
+                { x: Math.floor(gridSize / 2) - 2, z: Math.floor(gridSize / 2) },
+                { x: Math.floor(gridSize / 2) - 3, z: Math.floor(gridSize / 2) }
+            ];
+            direction = { x: 1, z: 0 };
+            nextDirections = [];
+            score = 0;
+            document.getElementById("score").textContent = score;
+            syncSnakeMeshes();
+            spawnFood();
+            timeAccumulator = 0;
+            previousTimestamp = null;
+            updateFollowCamera({ forceSnap: true });
+        }
+
+        function queueTurn(clockwise) {
+            const latest = nextDirections.length ? nextDirections[nextDirections.length - 1] : direction;
+            const turn = clockwise >= 0 ? 1 : -1;
+            const rotated = turn === 1
+                ? { x: -latest.z, z: latest.x }
+                : { x: latest.z, z: -latest.x };
+            nextDirections.push(rotated);
+        }
+
+        function advanceSnake() {
+            if (nextDirections.length) {
+                direction = nextDirections.shift();
+            }
+
+            const head = snakeSegments[0];
+            const newHead = { x: head.x + direction.x, z: head.z + direction.z };
+
+            const hitWall = newHead.x < 0 || newHead.z < 0 || newHead.x >= gridSize || newHead.z >= gridSize;
+            const hitSelf = snakeSegments.some(segment => segment.x === newHead.x && segment.z === newHead.z);
+
+            if (hitWall || hitSelf) {
+                endGame("Game Over", "You collided. Press Start to try again.");
+                return;
+            }
+
+            snakeSegments.unshift(newHead);
+
+            if (newHead.x === food.x && newHead.z === food.z) {
+                score += 10;
+                document.getElementById("score").textContent = score;
+                if (score > best) {
+                    best = score;
+                    localStorage.setItem("neo3d-best", best);
+                    document.getElementById("best").textContent = best;
+                }
+                spawnFood();
+            } else {
+                snakeSegments.pop();
+            }
+        }
+
+        function updateFollowCamera({ deltaSeconds = 0, forceSnap = false } = {}) {
+            const head = snakeSegments[0];
+            if (!head) {
+                return;
+            }
+
+            const world = positionToWorld(head);
+            headWorldPosition.set(world.x, world.y, world.z);
+
+            directionVector.set(direction.x, 0, direction.z);
+            if (directionVector.lengthSq() === 0) {
+                directionVector.set(1, 0, 0);
+            }
+            directionVector.normalize();
+
+            if (cameraTarget.lengthSq() === 0) {
+                cameraTarget.copy(headWorldPosition);
+            }
+
+            desiredCameraPosition.copy(headWorldPosition);
+            desiredCameraPosition.addScaledVector(directionVector, -followDistance);
+            desiredCameraPosition.y += followHeight;
+
+            if (forceSnap) {
+                camera.position.copy(desiredCameraPosition);
+                cameraTarget.copy(headWorldPosition);
+            } else {
+                const lerpFactor = Math.min(1, deltaSeconds * cameraLerpSpeed);
+                camera.position.lerp(desiredCameraPosition, lerpFactor);
+                cameraTarget.lerp(headWorldPosition, lerpFactor);
+            }
+
+            camera.lookAt(cameraTarget);
+        }
+
+        function setSpeed(label, interval) {
+            document.getElementById("speed-label").textContent = label;
+            stepInterval = interval;
+        }
+
+        function startGame() {
+            resetGame();
+            isRunning = true;
+            isPaused = false;
+            timeAccumulator = 0;
+            previousTimestamp = null;
+            const state = speedStates[speedIndex];
+            setSpeed(state.label, state.interval);
+            document.getElementById("overlay").classList.add("hidden");
+        }
+
+        function pauseGame() {
+            if (!isRunning) {
+                return;
+            }
+            isPaused = !isPaused;
+            document.getElementById("overlay").classList.toggle("hidden", !isPaused);
+            document.getElementById("overlay-title").textContent = isPaused ? "Paused" : "";
+            document.getElementById("overlay-body").textContent = isPaused ? "Resume with Space, P or the Pause button." : "";
+            if (!isPaused) {
+                previousTimestamp = null;
+            }
+        }
+
+        function endGame(title, body) {
+            isRunning = false;
+            isPaused = true;
+            document.getElementById("overlay").classList.remove("hidden");
+            document.getElementById("overlay-title").textContent = title;
+            document.getElementById("overlay-body").textContent = body;
+        }
+
+        function animate(timestamp) {
+            requestAnimationFrame(animate);
+
+            if (previousTimestamp === null) {
+                previousTimestamp = timestamp;
+            }
+            const delta = timestamp - previousTimestamp;
+            previousTimestamp = timestamp;
+            const deltaSeconds = delta / 1000;
+
+            if (isRunning && !isPaused) {
+                timeAccumulator += delta;
+                while (timeAccumulator >= stepInterval) {
+                    advanceSnake();
+                    timeAccumulator -= stepInterval;
+                }
+            }
+
+            syncSnakeMeshes(deltaSeconds);
+
+            if (orbitEnabled) {
+                camera.position.x = Math.sin(timestamp * 0.00025) * 15;
+                camera.position.z = Math.cos(timestamp * 0.00025) * 15;
+                camera.position.y = 12;
+                camera.lookAt(0, 0, 0);
+            } else {
+                updateFollowCamera({ deltaSeconds });
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function resize() {
+            const canvas = renderer.domElement;
+            const { clientWidth, clientHeight } = canvas.parentElement;
+            renderer.setSize(clientWidth, clientHeight, false);
+            camera.aspect = clientWidth / clientHeight;
+            camera.updateProjectionMatrix();
+        }
+
+        window.addEventListener("resize", resize);
+        resize();
+
+        document.getElementById("start").addEventListener("click", () => {
+            startGame();
+        });
+
+        document.getElementById("pause").addEventListener("click", () => {
+            if (!isRunning) {
+                return;
+            }
+            pauseGame();
+        });
+
+        const speedStates = [
+            { label: "Slow", interval: 220 },
+            { label: "Medium", interval: 180 },
+            { label: "Fast", interval: 140 }
+        ];
+        let speedIndex = 1;
+
+        setSpeed(speedStates[speedIndex].label, speedStates[speedIndex].interval);
+
+        document.getElementById("speed-btn").addEventListener("click", () => {
+            speedIndex = (speedIndex + 1) % speedStates.length;
+            const state = speedStates[speedIndex];
+            setSpeed(state.label, state.interval);
+        });
+
+        window.addEventListener("keydown", event => {
+            const key = event.key.toLowerCase();
+
+            if (["arrowleft", "a"].includes(key)) {
+                event.preventDefault();
+                queueTurn(-1);
+            } else if (["arrowright", "d"].includes(key)) {
+                event.preventDefault();
+                queueTurn(1);
+            } else if (key === " ") {
+                if (!isRunning) {
+                    startGame();
+                } else {
+                    pauseGame();
+                }
+            } else if (key === "p") {
+                orbitEnabled = !orbitEnabled;
+                if (!orbitEnabled) {
+                    updateFollowCamera({ forceSnap: true });
+                }
+            }
+        });
+
+        animate();
+        endGame("Press Start", "Use Left or Right to steer the snake.");
+    </script>
+</body>
+</html>
